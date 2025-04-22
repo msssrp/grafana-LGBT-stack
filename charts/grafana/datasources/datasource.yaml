@@ -1,0 +1,17 @@
+apiVersion: 1
+datasources:
+  - name: "{{ .Release.Name }}-Mimir"
+    type: prometheus
+    uid: "{{ .Release.Name }}-Mimir"
+    url: "http://{{ .Release.Name }}-mimir-nginx.{{ .Release.Namespace }}.svc/prometheus"
+    isDefault: true
+
+  - name: "{{ .Release.Name }}-Loki"
+    type: loki
+    uid: "{{ .Release.Name }}-Loki"
+    url: "http://{{ .Release.Name }}-loki-gateway.{{ .Release.Namespace }}.svc"
+    isDefault: false
+    jsonData:
+      httpHeaderName1: "X-Scope-OrgID"
+    secureJsonData:
+      httpHeaderValue1: "alloy"

@@ -1,0 +1,10 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  labels:
+    grafana_dashboard: "1"
+data:
+  loki-mimir-custom-dashboard.json: |
+{{ .Files.Get "dashboards/loki-mimir-custom-dashboard.json" | nindent 4 }}

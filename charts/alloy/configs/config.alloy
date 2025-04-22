@@ -1,0 +1,213 @@
+// Creates a receiver for OTLP gRPC.
+otelcol.receiver.otlp "otlp_receiver" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+  output {
+    traces = [
+      otelcol.exporter.otlp.tempo.input,
+    ]
+  }
+}
+
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = "http://{{ .Release.Name }}-tempo.{{ .Release.Namespace | default "default" }}.svc.{{ .Values.global.alloy.clusterDomain }}:4317"
+    tls {
+      insecure             = true
+      insecure_skip_verify = true
+    }
+  }
+}
+
+// Dicovery kubernetes resources and exporter
+discovery.kubernetes "services" {
+  role = "service"
+}
+
+discovery.kubernetes "k8s_pods" {
+  role = "pod"
+  selectors {
+    role  = "pod"
+    field = "spec.nodeName=" + coalesce(env("HOSTNAME"),   constants.hostname)
+  }
+}
+
+discovery.kubernetes "nodes" {
+  role = "node"
+}
+
+discovery.kubernetes "ingress" {
+  role = "ingress"
+}
+
+discovery.relabel "pod_logs" {
+  targets = discovery.kubernetes.k8s_pods.targets
+
+  rule {
+    source_labels = ["__meta_kubernetes_namespace"]
+    action = "replace"
+    target_label = "namespace"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_name"]
+    action = "replace"
+    target_label = "pod"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_container_name"]
+    action = "replace"
+    target_label = "container"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+    action = "replace"
+    target_label = "app"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_namespace", "__meta_kubernetes_pod_container_name"]
+    action = "replace"
+    target_label = "job"
+    separator = "/"
+    replacement = "$1"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
+    action = "replace"
+    target_label = "__path__"
+    separator = "/"
+    replacement = "/var/log/pods/*$1/*.log"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_container_id"]
+    action = "replace"
+    target_label = "container_runtime"
+    regex = "^(\\S+):\\/\\/.+$"
+    replacement = "$1"
+  }
+}
+
+
+prometheus.exporter.unix "node_exporters" { }
+
+// Relabel
+discovery.relabel "ingress_relabel" {
+  targets = discovery.kubernetes.ingress.targets
+
+  rule {
+    source_labels = ["__address__"]
+    regex = "(.*)"
+    action = "replace"
+    replacement = "https://$1"
+    target_label = "__param_target"
+  }
+
+  rule {
+    source_labels = ["__param_target"]
+    target_label = "instance"
+  }
+
+  rule {
+    target_label = "__address__"
+    replacement = "{{ .Release.Name }}-blackbox-prometheus-blackbox-exporter.{{ .Release.Namespace | default "default" }}.svc.{{ .Values.global.alloy.clusterDomain }}:9115"
+  }
+}
+
+discovery.relabel "k8s_node_cadvisor" {
+  targets    = discovery.kubernetes.nodes.targets
+  rule {
+    action = "labelmap"
+    regex = "__meta_kubernetes_node_label_(.+)"
+  }
+  rule {
+    action = "replace"
+    target_label = "__address__"
+    replacement = "kubernetes.default.svc:443"
+  }
+  rule {
+    action = "replace"
+    source_labels = ["__meta_kubernetes_node_name"]
+    regex = "(.+)"
+    target_label = "__metrics_path__"
+    replacement = "/api/v1/nodes/${1}/proxy/metrics/cadvisor"
+  }
+}
+
+// Prometheus scrape jobs
+prometheus.scrape "blackbox_ingress" {
+  targets    = discovery.relabel.ingress_relabel.output
+  params = {"module" = ["http_2xx"]}
+  metrics_path    = "/probe"
+  forward_to = [prometheus.remote_write.mimir.receiver]
+}
+
+prometheus.scrape "kube_state_metrics_discovery" {
+  targets = [{ "__address__" = "kube-state-metrics.{{ .Release.Namespace | default "default" }}.svc.{{ .Values.global.alloy.clusterDomain }}:8080" }]
+  forward_to = [prometheus.remote_write.mimir.receiver]
+}
+
+prometheus.scrape "node_exporter" {
+  targets    = prometheus.exporter.unix.node_exporters.targets
+  forward_to = [prometheus.remote_write.mimir.receiver]
+}
+
+prometheus.scrape "k8s_node_cadvisor" {
+  targets    = discovery.relabel.k8s_node_cadvisor.output
+  honor_labels = true
+  scheme = "https"
+  bearer_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+  tls_config {
+    ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+  }
+  forward_to = [prometheus.remote_write.mimir.receiver]
+}
+
+prometheus.remote_write "mimir" {
+  endpoint {
+    url = "http://{{ .Release.Name }}-mimir-nginx.{{ .Release.Namespace | default "default" }}.svc.{{ .Values.global.alloy.clusterDomain }}/api/v1/push"
+  }
+}
+
+logging {
+  level    = "info"
+  format   = "logfmt"
+  write_to = [loki.process.alloy.receiver]
+}
+
+loki.source.kubernetes "pods" {
+  targets    = discovery.relabel.pod_logs.output
+  forward_to = [loki.process.pod_logs.receiver]
+}
+
+loki.process "pod_logs" {
+  stage.static_labels {
+      values = {
+        cluster = "{{ .Values.global.clusterName }}",
+      }
+  }
+
+  forward_to = [loki.write.endpoint.receiver]
+}
+
+loki.process "alloy" {
+  stage.labels {
+    values = {
+      service_name = "alloy",
+    }
+  }
+  forward_to = [loki.write.endpoint.receiver]
+}
+
+loki.write "endpoint" {
+  endpoint {
+    url       = "http://{{ .Release.Name }}-loki-gateway.{{ .Release.Namespace | default "default" }}.svc.{{ .Values.global.alloy.clusterDomain }}/loki/api/v1/push"
+    tenant_id = "alloy"
+  }
+}
+

@@ -1,0 +1,148 @@
+# global configuration
+global:
+  alloy:
+    clusterDomain: "cluster.local"
+  configFile: "configs/config.alloy"
+  clusterName: "mark-test"
+  dnsService: "coredns"
+  minioUser: "admin"
+  minioPassword: "ClickNext@123"
+  # global storageClass use in loki, minio, tempo
+  storageClassName: "nfs-csi"
+  grafanaUser: "admin"
+  grafanaPassword: "ClickNext@123"
+
+minio:
+  clusterDomain: "cluster.local"
+  mode: standalone
+  persistence: # if global.storageClassName = "-" then storageCLass will not use
+    enabled: true
+    accessMode: ReadWriteMany
+    size: 50Gi
+  replicas: 1
+  resources:
+    requests:
+      memory: 1Gi
+  buckets:
+  - name: loki-logs
+  - name: mimir-storage-bucket
+  - name: mimir-ruler-bucket
+  - name: mimir-alert-bucket 
+  - name: tempo-storage
+  # == Security context for minio ==
+  #securityContext:
+    #enabled: true
+    #runAsUser: 1000
+    #runAsGroup: 1000
+    #fsGroup: 1000
+
+tempo:
+  storage:
+    trace:
+      backend: s3
+      s3:
+        access_key: "admin"
+        secret_key: "ClickNext@123"
+        bucket: "tempo-storage"
+        endpoint: "http://lgbt-minio.monitoring.svc.cluster.local:9000"
+        insecure: true
+  minio:
+    enabled: false
+  persistence:
+    enabled: true
+    accessModes:
+      - ReadWriteMany
+
+loki:
+  global:
+    clusterDomain: "cluster.local"
+  loki:
+    limits_config:
+      # Retention configuration
+      max_query_lookback: 672h # 28 days
+      retention_period: 672h   # 28 days
+    storage:
+      type: aws
+    storage_config:
+      tsdb_shipper:
+        cache_ttl: 168h
+      aws:
+        bucketnames: loki-logs
+        # this endpoint should be like this format http://<ReleaseName>-minio.<ReleaseNamespace>.svc.<ClusterDomain>:9000
+        endpoint: "http://lgbt-minio.monitoring.svc.cluster.local:9000"
+        # access_key_id = minioUser, secret_access_key = minioPassword
+        access_key_id: "admin"
+        secret_access_key: "ClickNext@123"
+        insecure: true
+        s3forcepathstyle: true
+    # -- The SecurityContext for Loki pods
+    #podSecurityContext:
+      #fsGroup: 10001
+      #runAsGroup: 10001
+      #runAsNonRoot: true
+      #runAsUser: 10001
+
+mimir-distributed:
+  global:
+    clusterDomain: cluster.local.
+    dnsService: "coredns"
+  mimir:
+    structuredConfig:
+      common:
+        storage:
+          backend: s3
+          s3:
+            bucket_name: "mimir-storage-bucket"
+            endpoint: "lgbt-minio.monitoring.svc:9000"
+            access_key_id: "admin"
+            secret_access_key: "ClickNext@123"
+            insecure: true
+            http:
+              insecure_skip_verify: true
+      blocks_storage:
+        backend: s3
+        s3:
+          bucket_name: "mimir-storage-bucket"
+      alertmanager_storage:
+        backend: s3
+        s3:
+          bucket_name: "mimir-alert-bucket"
+      ruler_storage:
+        backend: s3
+        s3:
+          bucket_name: "mimir-ruler-bucket"
+  compactor:
+    persistentVolume:
+      enabled: true
+      accessModes:
+        - ReadWriteMany
+      storageClass: "nfs-csi"
+  ingester:
+    persistentVolume:
+      enabled: true
+      accessModes:
+        - ReadWriteMany
+      storageClass: "nfs-csi"
+  store_gateway:
+    persistentVolume:
+      enabled: true
+      accessModes:
+        - ReadWriteMany
+      storageClass: "nfs-csi"
+
+grafana:
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hosts:
+    - grafana.attama.live
+    #tls:
+    #- secretName: mea-ssl
+    #  hosts:
+    #  - lineconnect-manage.mea.or.th
+  persistence:
+    enabled: true
+    accessModes:
+      - ReadWriteMany
+  dashboardsConfigMaps:
+    default: "grafana-dashboards"
